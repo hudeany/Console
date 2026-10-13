@@ -1,7 +1,5 @@
 /target
 /bin
-/.classpath
-/.flattened-pom.xml
 /build.version
 /build/
 /lib/
