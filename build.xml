@@ -6,7 +6,7 @@
 	<property name="artifactId" value="soderer-console" />
 
 	<!-- Dependency versions -->
-	<property name="jna.version" value="5.6.0" />
+	<property name="jna.version" value="5.19.1" />
 
 	<!-- Runtime libraries of this project go to "lib/" (may stay empty) -->
 	<target name="download_dependencies" depends="register_antbuildhelp">

@@ -112,8 +112,9 @@ public class ConsoleMenu {
 	}
 
 	/**
-	 * Shows this menu and handles the user's choices until the user goes back. Entering "q", "quit" or "exit" ends
-	 * the application immediately via System.exit(0).
+	 * Shows this menu and handles the user's choices until the user goes back. A sub menu can be chosen by its
+	 * number or by its title (with auto completion, arrow up/down cycles through the titles). Entering "q", "quit"
+	 * or "exit" ends the application immediately via System.exit(0).
 	 * Sub classes override this method to implement the actual menu action.
 	 *
 	 * @return 0 when the user goes back, a negative value returned by a sub menu to leave all menus
@@ -147,12 +148,13 @@ public class ConsoleMenu {
 
 			System.out.println("  0) " + defaultMenuTitle);
 
+			// Menu titles as auto completion values, so arrow up/down cycles through the texts
 			final List<String> autoCompletionStrings = new ArrayList<>();
 			autoCompletionStrings.add("");
-			for (int i = 1; i <= subMenus.size(); i++) {
-				autoCompletionStrings.add(Integer.toString(i));
+			for (final ConsoleMenu subMenu : subMenus) {
+				autoCompletionStrings.add(subMenu.getTitle());
 			}
-			autoCompletionStrings.add("0");
+			autoCompletionStrings.add(defaultMenuTitle);
 
 			String choice = new SimpleConsoleInput().withAutoCompletionStrings(autoCompletionStrings).withPrompt(" > ").readInput();
 			choice = choice == null ? "" : choice.trim();
@@ -163,13 +165,28 @@ public class ConsoleMenu {
 				ConsoleUtilities.clearScreen();
 				System.exit(0);
 			} else {
+				// Accept a menu title (e.g. selected via arrow keys) as well as a menu number.
+				// Titles are checked first, so a title consisting of digits also works.
+				Integer choiceInt = null;
+				if (defaultMenuTitle.equalsIgnoreCase(choice)) {
+					choiceInt = 0;
+				} else {
+					for (int i = 0; i < subMenus.size(); i++) {
+						if (subMenus.get(i).getTitle().equalsIgnoreCase(choice)) {
+							choiceInt = i + 1;
+							break;
+						}
+					}
+				}
+
 				// Only the parsing of the input is guarded here. Exceptions of the sub menus must not be
 				// swallowed and reported as invalid input.
-				Integer choiceInt;
-				try {
-					choiceInt = Integer.parseInt(choice);
-				} catch (@SuppressWarnings("unused") final NumberFormatException e) {
-					choiceInt = null;
+				if (choiceInt == null) {
+					try {
+						choiceInt = Integer.parseInt(choice);
+					} catch (@SuppressWarnings("unused") final NumberFormatException e) {
+						choiceInt = null;
+					}
 				}
 
 				if (choiceInt == null) {
