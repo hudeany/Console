@@ -147,7 +147,14 @@ public class ConsoleMenu {
 
 			System.out.println("  0) " + defaultMenuTitle);
 
-			String choice = new SimpleConsoleInput().withPrompt(" > ").readInput();
+			final List<String> autoCompletionStrings = new ArrayList<>();
+			autoCompletionStrings.add("");
+			for (int i = 1; i <= subMenus.size(); i++) {
+				autoCompletionStrings.add(Integer.toString(i));
+			}
+			autoCompletionStrings.add("0");
+
+			String choice = new SimpleConsoleInput().withAutoCompletionStrings(autoCompletionStrings).withPrompt(" > ").readInput();
 			choice = choice == null ? "" : choice.trim();
 
 			if (Utilities.isBlank(choice)) {
