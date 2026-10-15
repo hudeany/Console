@@ -2,10 +2,12 @@ package de.soderer.console;
 
 import java.awt.Toolkit;
 import java.awt.datatransfer.DataFlavor;
+import java.io.EOFException;
 import java.util.ArrayList;
 import java.util.List;
 
 import de.soderer.console.ConsoleUtilities.TextAttribute;
+import de.soderer.console.utilities.SystemUtilities;
 import de.soderer.console.utilities.Utilities;
 
 /**
@@ -211,14 +213,14 @@ public class SimpleConsoleInput {
 			boolean insertMode = true;
 			String content = presetContent == null ? "" : presetContent;
 			int cursorIndex = content.length();
-			final int previousContentLength = content.length();
 
+			// Keep the Linux raw mode active for the whole input instead of switching it for every single key.
+			// Otherwise keys typed in between would be echoed by the terminal, and each key would start two 'stty' processes.
+			final boolean linuxRawModeMustBeReset = !SystemUtilities.isWindowsSystem() && ConsoleUtilities.activateLinuxConsoleRawMode();
 			try {
-				ConsoleUtilities.saveCurrentCursorPosition();
+				ConsoleUtilities.hideCursor();
+				final InputLineRenderer renderer = InputLineRenderer.start(prompt);
 				while (true) {
-					ConsoleUtilities.hideCursor();
-					ConsoleUtilities.moveCursorToSavedPosition();
-
 					TextAttribute[] cursorTextAttributes;
 					if (insertMode) {
 						cursorTextAttributes = new TextAttribute[] {TextAttribute.UNDERLINE, TextAttribute.HIGH_INTENSITY};
@@ -226,39 +228,24 @@ public class SimpleConsoleInput {
 						cursorTextAttributes = new TextAttribute[] {TextAttribute.REVERSE_VIDEO};
 					}
 
-					System.out.print(prompt);
-					if (hideCharacter == null) {
-						System.out.print(content.substring(0, cursorIndex));
-						if (content.length() > cursorIndex) {
-							System.out.print(ConsoleUtilities.getAnsiFormattedText(content.substring(cursorIndex, cursorIndex + 1), null, null, cursorTextAttributes) + content.substring(cursorIndex + 1));
-						} else {
-							System.out.print(ConsoleUtilities.getAnsiFormattedText(" ", null, null, cursorTextAttributes));
-						}
+					final String displayedContent = hideCharacter == null ? content : Utilities.repeat(hideCharacter, content.length());
+					if (cursorIndex < displayedContent.length()) {
+						renderer.render(displayedContent.substring(0, cursorIndex), displayedContent.substring(cursorIndex, cursorIndex + 1), displayedContent.substring(cursorIndex + 1), cursorTextAttributes);
 					} else {
-						System.out.print(Utilities.repeat(hideCharacter, cursorIndex));
-						if (content.length() > cursorIndex) {
-							System.out.print(ConsoleUtilities.getAnsiFormattedText(hideCharacter.toString(), null, null, cursorTextAttributes) + Utilities.repeat(hideCharacter, content.length() - cursorIndex - 1));
-						} else {
-							System.out.print(ConsoleUtilities.getAnsiFormattedText(" ", null, null, cursorTextAttributes));
-						}
+						renderer.render(displayedContent, " ", "", cursorTextAttributes);
 					}
-
-					// Linux needs some extra cleared chars
-					if (content.length() - previousContentLength > 0) {
-						System.out.print(Utilities.repeat(" ", content.length() - previousContentLength));
-					}
-
-					ConsoleUtilities.clearLineContentAfterCursor();
-
-					ConsoleUtilities.moveCursorToSavedPosition();
 
 					final int keyCode = ConsoleUtilities.readKey();
 
-					if (keyCode == ConsoleUtilities.KeyCode_CtrlC) {
+					if (keyCode == ConsoleUtilities.KeyCode_EndOfInput) {
+						throw new EOFException("End of console input");
+					} else if (keyCode == ConsoleUtilities.KeyCode_CtrlC) {
 						ConsoleUtilities.showCursor();
 						System.exit(1);
 					} else if (keyCode == ConsoleUtilities.KeyCode_CtrlV) {
-						final String data = readClipboardTextOrNull();
+						// Line breaks and other control characters are not allowed in a single line input
+						final String clipboardText = ConsoleUtilities.removeControlCharacters(readClipboardTextOrNull());
+						final String data = clipboardText == null ? null : normalizeInsertedText(clipboardText);
 						if (data == null) {
 							if (!silent) {
 								beep();
@@ -274,10 +261,8 @@ public class SimpleConsoleInput {
 					} else if (keyCode == ConsoleUtilities.KeyCode_Escape) {
 						// do nothing
 					} else if (keyCode == ConsoleUtilities.KeyCode_Enter) {
-						// Remove special displayed cursor
-						ConsoleUtilities.moveCursorToSavedPosition();
-						System.out.print(prompt);
-						System.out.println(content + " ");
+						// Remove special displayed cursor. Never show hidden input in clear text.
+						renderer.renderFinal(hideCharacter == null ? content : Utilities.repeat(hideCharacter, content.length()));
 						ConsoleUtilities.showCursor();
 						return content;
 					} else if (keyCode == ConsoleUtilities.KeyCode_Backspace) {
@@ -296,13 +281,13 @@ public class SimpleConsoleInput {
 					} else if (keyCode == ConsoleUtilities.KeyCode_ArrowLeft) {
 						if (cursorIndex > 0) {
 							cursorIndex--;
-						} else {
+						} else if (!silent) {
 							beep();
 						}
 					} else if (keyCode == ConsoleUtilities.KeyCode_ArrowRight) {
 						if (cursorIndex < content.length()) {
 							cursorIndex++;
-						} else {
+						} else if (!silent) {
 							beep();
 						}
 					} else if (keyCode == ConsoleUtilities.KeyCode_ArrowDown) {
@@ -310,7 +295,7 @@ public class SimpleConsoleInput {
 						if (autoCompletionStringsToCheck != null && autoCompletionStringsToCheck.size() > 0) {
 							int currentIndexOfAutocompletion = -1;
 							for (int i = 0; i < autoCompletionStringsToCheck.size(); i++) {
-								if (autoCompletionStringsToCheck.get(i) != null && autoCompletionStringsToCheck.get(i).equals(content)) {
+								if (autoCompletionStringsToCheck.get(i) != null && isSameAutoCompletionValue(autoCompletionStringsToCheck.get(i), content)) {
 									currentIndexOfAutocompletion = i;
 									break;
 								}
@@ -332,12 +317,14 @@ public class SimpleConsoleInput {
 						} else if (!silent) {
 							beep();
 						}
-					} else if (keyCode == ConsoleUtilities.KeyCode_ArrowUp) {
+					} else if (keyCode == ConsoleUtilities.KeyCode_ArrowUp || keyCode == ConsoleUtilities.KeyCode_ReverseTab) {
+						// Shift+Tab steps backward through the auto completion values like Arrow up. The key code is passed on,
+						// so subclasses can offer different values for it (e.g. the parent directory in FilepathConsoleInput).
 						final List<String> autoCompletionStringsToCheck = getAutoCompletionStrings(content, keyCode);
 						if (autoCompletionStringsToCheck != null && autoCompletionStringsToCheck.size() > 0) {
 							int currentIndexOfAutocompletion = -1;
 							for (int i = 0; i < autoCompletionStringsToCheck.size(); i++) {
-								if (autoCompletionStringsToCheck.get(i) != null && autoCompletionStringsToCheck.get(i).equals(content)) {
+								if (autoCompletionStringsToCheck.get(i) != null && isSameAutoCompletionValue(autoCompletionStringsToCheck.get(i), content)) {
 									currentIndexOfAutocompletion = i;
 									break;
 								}
@@ -364,7 +351,7 @@ public class SimpleConsoleInput {
 						if (autoCompletionStringsToCheck != null && autoCompletionStringsToCheck.size() > 0) {
 							int autoCompletionIndex = -1;
 							for (int i = 0; i < autoCompletionStringsToCheck.size(); i++) {
-								if (content.equals(autoCompletionStringsToCheck.get(i))) {
+								if (autoCompletionStringsToCheck.get(i) != null && isSameAutoCompletionValue(autoCompletionStringsToCheck.get(i), content)) {
 									autoCompletionIndex = i;
 									break;
 								}
@@ -386,7 +373,7 @@ public class SimpleConsoleInput {
 						if (autoCompletionStringsToCheck != null && autoCompletionStringsToCheck.size() > 0) {
 							int autoCompletionIndex = -1;
 							for (int i = 0; i < autoCompletionStringsToCheck.size(); i++) {
-								if (content.equals(autoCompletionStringsToCheck.get(i))) {
+								if (autoCompletionStringsToCheck.get(i) != null && isSameAutoCompletionValue(autoCompletionStringsToCheck.get(i), content)) {
 									autoCompletionIndex = i;
 									break;
 								}
@@ -415,14 +402,12 @@ public class SimpleConsoleInput {
 						if (autoCompletionStringsToCheck != null) {
 							String autoCompletionStringCandidate = null;
 							for (final String autoCompletionString : autoCompletionStringsToCheck) {
-								if (autoCompletionString != null && autoCompletionString.startsWith(prefix)) {
+								if (autoCompletionString != null && matchesAutoCompletionPrefix(autoCompletionString, prefix)) {
 									if (autoCompletionStringCandidate == null) {
 										autoCompletionStringCandidate = autoCompletionString;
 									} else {
+										// Ambiguous: beeped once below
 										autoCompletionStringCandidate = null;
-										if (!silent) {
-											beep();
-										}
 										break;
 									}
 								}
@@ -437,22 +422,24 @@ public class SimpleConsoleInput {
 							beep();
 						}
 					} else {
-						// "keyCode < 1000" to prevent Chinese symbols on some systems, that occur without intention.
-						// "keyCode >= 0x20" excludes remaining control characters (0-31) that are not handled by an
-						// explicit branch above, so they cannot silently end up as literal characters in the input.
-						if ((allowedCharacters != null && allowedCharacters.contains("" + (char) keyCode)) || (keyCode >= 0x20 && keyCode < 1000)) {
+						// Control characters and special key codes are excluded, so they cannot silently end up as literal characters in the input.
+						if ((allowedCharacters != null && allowedCharacters.contains("" + (char) keyCode)) || ConsoleUtilities.isInsertableCharacter(keyCode)) {
+							final String insertedText = normalizeInsertedText(Character.toString((char) keyCode));
 							if (insertMode || cursorIndex == content.length()) {
-								content = content.substring(0, cursorIndex) + ((char) keyCode) + content.substring(cursorIndex);
-								cursorIndex++;
+								content = content.substring(0, cursorIndex) + insertedText + content.substring(cursorIndex);
 							} else {
-								content = content.substring(0, cursorIndex) + ((char) keyCode) + content.substring(cursorIndex + 1);
-								cursorIndex++;
+								final String rest = content.substring(cursorIndex);
+								content = content.substring(0, cursorIndex) + insertedText + (rest.length() > insertedText.length() ? rest.substring(insertedText.length()) : "");
 							}
+							cursorIndex += insertedText.length();
 						}
 					}
 				}
 			} finally {
 				ConsoleUtilities.showCursor();
+				if (linuxRawModeMustBeReset) {
+					ConsoleUtilities.deactivateLinuxConsoleRawMode();
+				}
 			}
 		} else {
 			return readViaSystemConsole();
@@ -487,6 +474,46 @@ public class SimpleConsoleInput {
 	 */
 	protected List<String> getAutoCompletionStrings(final String checkContent, final int keyCode) {
 		return autoCompletionStrings;
+	}
+
+	/**
+	 * Override hook to normalize text before it is inserted into the input, either typed or pasted.
+	 * Used e.g. by {@link FilepathConsoleInput} to convert '/' into the Windows path separator, so the content always
+	 * matches the auto completion values, which use the system's path separator.
+	 *
+	 * @param text text to insert, never null
+	 * @return text to insert instead, never null
+	 */
+	@SuppressWarnings("static-method")
+	protected String normalizeInsertedText(final String text) {
+		return text;
+	}
+
+	/**
+	 * Override hook deciding whether an auto completion value matches the text in front of the cursor on Tab.
+	 * Used e.g. by {@link FilepathConsoleInput} for case insensitive matching on Windows.
+	 *
+	 * @param autoCompletionString auto completion value, never null
+	 * @param prefix text in front of the cursor
+	 * @return true if the value completes the prefix
+	 */
+	@SuppressWarnings("static-method")
+	protected boolean matchesAutoCompletionPrefix(final String autoCompletionString, final String prefix) {
+		return autoCompletionString.startsWith(prefix);
+	}
+
+	/**
+	 * Override hook deciding whether the current content equals an auto completion value, to find the current position
+	 * when stepping through the values with Arrow up/down and Page up/down.
+	 * Used e.g. by {@link FilepathConsoleInput} for case insensitive comparison on Windows.
+	 *
+	 * @param autoCompletionString auto completion value, never null
+	 * @param content current input content
+	 * @return true if both are the same value
+	 */
+	@SuppressWarnings("static-method")
+	protected boolean isSameAutoCompletionValue(final String autoCompletionString, final String content) {
+		return autoCompletionString.equals(content);
 	}
 
 	/**

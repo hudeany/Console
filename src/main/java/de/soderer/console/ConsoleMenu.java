@@ -40,14 +40,16 @@ public class ConsoleMenu {
 	 * @throws Exception if the parent menu is missing
 	 */
 	public ConsoleMenu(final ConsoleMenu parentMenu, final String menuTitle) throws Exception {
-		if (parentMenu != null) {
-			parentMenu.addSubMenu(this);
-		} else {
+		if (parentMenu == null) {
 			throw new Exception("Invalid empty parent menu");
 		}
 		this.parentMenu = parentMenu;
 		mainTitle = parentMenu.getMainTitle();
 		this.menuTitle = menuTitle;
+		// Registered at the parent only after all fields are set, so the parent never sees a half initialized menu.
+		// The compiler warning "this-escape" remains for subclasses (their own fields are not set yet at this point),
+		// which is harmless here, because the parent only uses the sub menu later in show().
+		parentMenu.addSubMenu(this);
 	}
 
 	/**
@@ -154,20 +156,25 @@ public class ConsoleMenu {
 				ConsoleUtilities.clearScreen();
 				System.exit(0);
 			} else {
+				// Only the parsing of the input is guarded here. Exceptions of the sub menus must not be
+				// swallowed and reported as invalid input.
+				Integer choiceInt;
 				try {
-					final int choiceInt = Integer.parseInt(choice);
+					choiceInt = Integer.parseInt(choice);
+				} catch (@SuppressWarnings("unused") final NumberFormatException e) {
+					choiceInt = null;
+				}
 
-					if (choiceInt == 0) {
-						return 0;
-					} else if (1 <= choiceInt && choiceInt <= subMenus.size()) {
-						final int returnValue = subMenus.get(choiceInt - 1).show();
-						if (returnValue < 0) {
-							return returnValue;
-						}
-					} else {
-						errors.add("Invalid input: " + choice);
+				if (choiceInt == null) {
+					errors.add("Invalid input: " + choice);
+				} else if (choiceInt == 0) {
+					return 0;
+				} else if (1 <= choiceInt && choiceInt <= subMenus.size()) {
+					final int returnValue = subMenus.get(choiceInt - 1).show();
+					if (returnValue < 0) {
+						return returnValue;
 					}
-				} catch (@SuppressWarnings("unused") final Exception e) {
+				} else {
 					errors.add("Invalid input: " + choice);
 				}
 			}
@@ -223,14 +230,19 @@ public class ConsoleMenu {
 		choice = choice == null ? "" : choice.trim();
 		if (Utilities.isBlank(choice)) {
 			return null;
+		} else if (selectionValues.contains(choice)) {
+			// Checked first, so numeric selection values (e.g. "2024") can also be entered directly
+			return choice;
 		} else if (!NumberUtilities.isNumber(choice)) {
-			if (selectionValues.contains(choice)) {
-				return choice;
-			} else {
-				throw new Exception("Invalid selection: " + choice);
-			}
+			throw new Exception("Invalid selection: " + choice);
 		} else {
-			final int choiseInt = Integer.parseInt(choice);
+			final int choiseInt;
+			try {
+				choiseInt = Integer.parseInt(choice);
+			} catch (final NumberFormatException e) {
+				// e.g. "1.5" or "1e3"
+				throw new Exception("Invalid selection: " + choice, e);
+			}
 			if (choiseInt < 1 || choiseInt > selectionValues.size()) {
 				throw new Exception("Invalid selection: " + choice);
 			} else {

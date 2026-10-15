@@ -1,6 +1,7 @@
 package de.soderer.console;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.File;
@@ -118,5 +119,63 @@ public class FilepathConsoleInputTest {
 		final List<String> sortedValues = new ArrayList<>(values);
 		Collections.sort(sortedValues);
 		return sortedValues;
+	}
+
+	@Test
+	public void testWindowsSyntaxConvertsTypedSlashes() {
+		assertEquals("C:\\Users\\x", windowsInput().normalizeInsertedText("C:/Users/x"));
+	}
+
+	@Test
+	public void testNonWindowsSyntaxKeepsBackslashes() {
+		assertEquals("a\\b/c", nonWindowsInput().normalizeInsertedText("a\\b/c"));
+	}
+
+	@Test
+	public void testWindowsSyntaxMatchesPrefixCaseInsensitive() {
+		assertTrue(windowsInput().matchesAutoCompletionPrefix("C:\\Program Files\\Common Files", "c:\\program files\\com"));
+		assertFalse(windowsInput().matchesAutoCompletionPrefix("C:\\Program Files", "c:\\program files\\com"));
+	}
+
+	@Test
+	public void testNonWindowsSyntaxMatchesPrefixCaseSensitive() {
+		assertTrue(nonWindowsInput().matchesAutoCompletionPrefix("/home/Andreas", "/home/And"));
+		assertFalse(nonWindowsInput().matchesAutoCompletionPrefix("/home/Andreas", "/home/and"));
+	}
+
+	@Test
+	public void testWindowsSyntaxComparesValuesCaseInsensitive() {
+		assertTrue(windowsInput().isSameAutoCompletionValue("C:\\Program Files", "c:\\program files"));
+		assertFalse(nonWindowsInput().isSameAutoCompletionValue("/home/Andreas", "/home/andreas"));
+	}
+
+	@Test
+	public void testReverseTabOffersParentDirectory() {
+		final String betaDirectory = path("beta") + File.separator;
+		assertEquals(List.of(tempDirectory.toString() + File.separator), new FilepathConsoleInput().getAutoCompletionStrings(betaDirectory, ConsoleUtilities.KeyCode_ReverseTab));
+		assertEquals(List.of(betaDirectory), new FilepathConsoleInput().getAutoCompletionStrings(betaDirectory + "inner.txt", ConsoleUtilities.KeyCode_ReverseTab));
+	}
+
+	@Test
+	public void testReverseTabOnRootOffersNothing() {
+		assertTrue(new FilepathConsoleInput().getAutoCompletionStrings(File.listRoots()[0].toString(), ConsoleUtilities.KeyCode_ReverseTab).isEmpty());
+	}
+
+	private static FilepathConsoleInput windowsInput() {
+		return new FilepathConsoleInput() {
+			@Override
+			boolean isWindowsPathSyntax() {
+				return true;
+			}
+		};
+	}
+
+	private static FilepathConsoleInput nonWindowsInput() {
+		return new FilepathConsoleInput() {
+			@Override
+			boolean isWindowsPathSyntax() {
+				return false;
+			}
+		};
 	}
 }

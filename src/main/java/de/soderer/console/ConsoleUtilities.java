@@ -1,13 +1,13 @@
 package de.soderer.console;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.Reader;
 import java.time.Duration;
 import java.time.LocalDateTime;
-import java.util.LinkedList;
 import java.util.Locale;
-import java.util.Queue;
+import java.util.concurrent.TimeoutException;
 
 import de.soderer.console.utilities.DateUtilities;
 import de.soderer.console.utilities.SystemUtilities;
@@ -24,8 +24,6 @@ public class ConsoleUtilities {
 	private ConsoleUtilities() {
 		// Only static methods
 	}
-
-	private static volatile Queue<Character> consoleInputBuffer = null;
 
 	private static volatile ConsoleType consoleType = null;
 	private static volatile boolean linuxConsoleActivatedRawMode = false;
@@ -81,9 +79,17 @@ public class ConsoleUtilities {
 	 */
 	public static final int KeyCode_Tab = 9;
 	/**
-	 * There is no Windows Code for ReverseTab
+	 * Key code of Shift+Tab (reverse tab): 0xE000 + scan code 0x0F, the same scheme as the other special keys on Windows.
+	 * Linux terminals send the escape sequence "ESC [ Z", which is mapped to this code.
+	 * <p>
+	 * Before, this was -1, which could not be distinguished from {@link #KeyCode_EndOfInput}.
 	 */
-	public static final int KeyCode_ReverseTab = -1;
+	public static final int KeyCode_ReverseTab = 57359;
+	/**
+	 * Returned at the end of the input, e.g. at the end of redirected standard input.
+	 * Input loops must stop reading when they get this code.
+	 */
+	public static final int KeyCode_EndOfInput = -1;
 	/**
 	 * Key code of Escape.
 	 */
@@ -130,6 +136,66 @@ public class ConsoleUtilities {
 	 * Key code of Arrow down.
 	 */
 	public static final int KeyCode_ArrowDown = 57424;
+
+	/**
+	 * Key code of F1 (0xE000 + scan code 0x3B, as on Windows).
+	 */
+	public static final int KeyCode_F1 = 57403;
+
+	/**
+	 * Key code of F2 (0xE000 + scan code 0x3C, as on Windows).
+	 */
+	public static final int KeyCode_F2 = 57404;
+
+	/**
+	 * Key code of F3 (0xE000 + scan code 0x3D, as on Windows).
+	 */
+	public static final int KeyCode_F3 = 57405;
+
+	/**
+	 * Key code of F4 (0xE000 + scan code 0x3E, as on Windows).
+	 */
+	public static final int KeyCode_F4 = 57406;
+
+	/**
+	 * Key code of F5 (0xE000 + scan code 0x3F, as on Windows).
+	 */
+	public static final int KeyCode_F5 = 57407;
+
+	/**
+	 * Key code of F6 (0xE000 + scan code 0x40, as on Windows).
+	 */
+	public static final int KeyCode_F6 = 57408;
+
+	/**
+	 * Key code of F7 (0xE000 + scan code 0x41, as on Windows).
+	 */
+	public static final int KeyCode_F7 = 57409;
+
+	/**
+	 * Key code of F8 (0xE000 + scan code 0x42, as on Windows).
+	 */
+	public static final int KeyCode_F8 = 57410;
+
+	/**
+	 * Key code of F9 (0xE000 + scan code 0x43, as on Windows).
+	 */
+	public static final int KeyCode_F9 = 57411;
+
+	/**
+	 * Key code of F10 (0xE000 + scan code 0x44, as on Windows).
+	 */
+	public static final int KeyCode_F10 = 57412;
+
+	/**
+	 * Key code of F11 (0xE000 + scan code 0x85, as on Windows).
+	 */
+	public static final int KeyCode_F11 = 57477;
+
+	/**
+	 * Key code of F12 (0xE000 + scan code 0x86, as on Windows).
+	 */
+	public static final int KeyCode_F12 = 57478;
 
 	/**
 	 * ANSI colors for foreground and background of text.
@@ -307,36 +373,88 @@ public class ConsoleUtilities {
 	 * @return detected console type
 	 */
 	public static ConsoleType getConsoleType() {
-		if (consoleType == null) {
-			if (SystemUtilities.isWindowsSystem() || (System.console() != null && System.getenv().get("TERM") != null)) {
-				consoleType = ConsoleType.ANSI;
-				try {
-					getTerminalSize();
-				} catch (@SuppressWarnings("unused") final Throwable t) {
-					consoleType = ConsoleType.TEST;
-				}
-			} else {
-				consoleType = ConsoleType.TEST;
-			}
+		final ConsoleType detectedConsoleType = consoleType;
+		if (detectedConsoleType != null) {
+			return detectedConsoleType;
 		}
-		return consoleType;
+		// Synchronized, so concurrent first calls do not run the detection (and its terminal requests) twice
+		synchronized (ConsoleUtilities.class) {
+			if (consoleType == null) {
+				consoleType = detectConsoleType();
+			}
+			return consoleType;
+		}
+	}
+
+	private static ConsoleType detectConsoleType() {
+		final boolean ansiCandidate;
+		if (SystemUtilities.isWindowsSystem()) {
+			// Without a real console on stdin and stdout (redirected streams, IDE console) the detection below would
+			// consume redirected input and write escape sequences into redirected output
+			ansiCandidate = isWindowsConsoleAttached();
+		} else {
+			final String term = System.getenv("TERM");
+			ansiCandidate = isInteractiveSystemConsole() && term != null && !"dumb".equalsIgnoreCase(term);
+		}
+
+		if (ansiCandidate) {
+			try {
+				// The console only counts as ANSI console, if it answers the request for the cursor position in time
+				readTerminalSize();
+				return ConsoleType.ANSI;
+			} catch (@SuppressWarnings("unused") final Throwable t) {
+				return ConsoleType.TEST;
+			}
+		} else {
+			return ConsoleType.TEST;
+		}
+	}
+
+	private static boolean isWindowsConsoleAttached() {
+		try {
+			return WindowsKeyStrokeReader.isConsoleAttached();
+		} catch (@SuppressWarnings("unused") final Throwable t) {
+			// e.g. JNA not available
+			return false;
+		}
+	}
+
+	/**
+	 * Since Java 22 System.console() also returns a Console object for redirected streams, so Console.isTerminal()
+	 * must be checked additionally. It is called via reflection to stay compatible with older Java versions.
+	 */
+	private static boolean isInteractiveSystemConsole() {
+		final java.io.Console console = System.console();
+		if (console == null) {
+			return false;
+		}
+		try {
+			final Object isTerminal = java.io.Console.class.getMethod("isTerminal").invoke(console);
+			return Boolean.TRUE.equals(isTerminal);
+		} catch (@SuppressWarnings("unused") final NoSuchMethodException e) {
+			// Java 21 and older: a non-null console is always an interactive terminal
+			return true;
+		} catch (@SuppressWarnings("unused") final Exception e) {
+			return true;
+		}
 	}
 
 	/**
 	 * Switches the Linux terminal into raw mode without echo via 'stty', so single keys can be read.
+	 * Output post-processing stays active, so "\n" still starts a new line at column 1 while raw mode is active.
 	 * A shutdown hook resets the mode on exit.
 	 *
 	 * @return true if the mode was switched, false if it was already active
 	 * @throws Exception if 'stty' fails
 	 */
-	public static boolean activateLinuxConsoleRawMode() throws Exception {
+	public static synchronized boolean activateLinuxConsoleRawMode() throws Exception {
 		if (!linuxConsoleActivatedRawMode) {
-			final int exitCode = Runtime.getRuntime().exec(new String[] { "/bin/sh", "-c", "stty raw -echo < /dev/tty" }).waitFor();
+			final int exitCode = executeStty("raw -echo opost");
 			if (exitCode != 0) {
 				throw new Exception("Cannot activate linux console raw mode: 'stty' returned exit code " + exitCode);
 			}
 			linuxConsoleActivatedRawMode = true;
-			registerShutdownHook();
+			registerShutdownHookOnce();
 			return true;
 		} else {
 			return false;
@@ -348,9 +466,9 @@ public class ConsoleUtilities {
 	 *
 	 * @throws Exception if 'stty' fails
 	 */
-	public static void deactivateLinuxConsoleRawMode() throws Exception {
+	public static synchronized void deactivateLinuxConsoleRawMode() throws Exception {
 		if (linuxConsoleActivatedRawMode) {
-			final int exitCode = Runtime.getRuntime().exec(new String[] { "/bin/sh", "-c", "stty -raw echo </dev/tty" }).waitFor();
+			final int exitCode = executeStty("-raw echo");
 			// Mark as deactivated even on failure, so we don't get stuck retrying a broken 'stty' on every subsequent call
 			linuxConsoleActivatedRawMode = false;
 			if (exitCode != 0) {
@@ -359,17 +477,76 @@ public class ConsoleUtilities {
 		}
 	}
 
-	private static void registerShutdownHook() {
-		Runtime.getRuntime().addShutdownHook(new Thread() {
-			@Override
-			public void run() {
-				try {
-					deactivateLinuxConsoleRawMode();
-				} catch (@SuppressWarnings("unused") final Exception e) {
-					// do nothing
+	/**
+	 * Executes 'stty' on the controlling terminal and closes all streams of the process afterwards.
+	 */
+	private static int executeStty(final String sttyArguments) throws Exception {
+		final Process process = new ProcessBuilder("/bin/sh", "-c", "stty " + sttyArguments + " < /dev/tty").redirectErrorStream(true).start();
+		try (InputStream processOutput = process.getInputStream()) {
+			process.getOutputStream().close();
+			// Drain the output, so the process cannot block on a full pipe
+			processOutput.readAllBytes();
+			return process.waitFor();
+		}
+	}
+
+	private static volatile boolean shutdownHookRegistered = false;
+
+	/**
+	 * Registers the shutdown hook resetting the raw mode only once, no matter how often the raw mode is activated.
+	 */
+	private static synchronized void registerShutdownHookOnce() {
+		if (!shutdownHookRegistered) {
+			Runtime.getRuntime().addShutdownHook(new Thread("ConsoleRawModeReset") {
+				@Override
+				public void run() {
+					try {
+						deactivateLinuxConsoleRawMode();
+					} catch (@SuppressWarnings("unused") final Exception e) {
+						// do nothing
+					}
 				}
+			});
+			shutdownHookRegistered = true;
+		}
+	}
+
+	/**
+	 * Checks whether a key code read by {@link #readKey()} is a character that may be inserted into a text input.
+	 * Control characters (including DEL) and the key codes of special keys (0xE000 and above) are excluded, as well
+	 * as code points of 0x2000 and above (to prevent Chinese symbols on some systems, that occur without intention),
+	 * except for the Euro sign.
+	 *
+	 * @param keyCode key code to check
+	 * @return true if the key code is an insertable character
+	 */
+	public static boolean isInsertableCharacter(final int keyCode) {
+		if (keyCode == '\u20AC') {
+			return true;
+		} else {
+			return keyCode >= 0x20 && keyCode < 0x2000 && !Character.isISOControl(keyCode);
+		}
+	}
+
+	/**
+	 * Removes all control characters (e.g. line breaks, tabs and escape sequence introducers) from a text,
+	 * e.g. for pasted clipboard content in a single line input.
+	 *
+	 * @param text text to clean, may be null
+	 * @return text without control characters, or null for null input
+	 */
+	public static String removeControlCharacters(final String text) {
+		if (text == null) {
+			return null;
+		}
+		final StringBuilder result = new StringBuilder(text.length());
+		for (int i = 0; i < text.length(); i++) {
+			final char character = text.charAt(i);
+			if (!Character.isISOControl(character)) {
+				result.append(character);
 			}
-		});
+		}
+		return result.toString();
 	}
 
 	/**
@@ -415,8 +592,8 @@ public class ConsoleUtilities {
 		final String rightPart = "] " + itemsToDoString + " " + speedString + " " + etaString;
 		final int barWith = Math.max(0, lineLength - (leftPart.length() + rightPart.length()));
 		if (barWith == 0) {
-			// Not enough space left for a bar, only render percentage and info parts
-			return leftPart.substring(0, leftPart.length() - 1) + rightPart.substring(1);
+			// Not enough space left for a bar, only render percentage and info parts (rightPart starts with "] ")
+			return percentageString + rightPart.substring(1);
 		}
 		int barDone = barWith * percentageDone / 100;
 		if (barDone < 1) {
@@ -583,6 +760,33 @@ public class ConsoleUtilities {
 	}
 
 	/**
+	 * Reads the answer of a Windows console to an ANSI position request ("\033[6n") up to the terminating 'R'.
+	 * The answer may arrive with a delay, so reading does not stop at the first moment without available input,
+	 * but only when the terminator was read or the timeout has passed.
+	 *
+	 * @param response buffer receiving the answer
+	 * @param timeoutMillis maximum time to wait for the answer
+	 * @throws Exception if the console cannot be read
+	 */
+	static void readWindowsAnsiPositionResponse(final StringBuilder response, final long timeoutMillis) throws Exception {
+		final long deadline = System.currentTimeMillis() + timeoutMillis;
+		while (true) {
+			final int keyCode = WindowsKeyStrokeReader.readKey(false);
+			if (keyCode > 0) {
+				response.append((char) keyCode);
+				if (keyCode == 'R') {
+					return;
+				}
+			} else if (keyCode == KeyCode_EndOfInput || System.currentTimeMillis() > deadline) {
+				// End of input or no (complete) answer in time
+				return;
+			} else {
+				Thread.sleep(5);
+			}
+		}
+	}
+
+	/**
 	 * Requests the current cursor position from the terminal (ANSI "\033[6n").
 	 *
 	 * @return current cursor position
@@ -596,29 +800,25 @@ public class ConsoleUtilities {
 				if (SystemUtilities.isWindowsSystem()) {
 					// Request current cursor position
 					System.out.print("\033[6n");
-
-					int keyBuffer;
-					while ((keyBuffer = WindowsKeyStrokeReader.readKey(false)) > 0) {
-						response.append((char) keyBuffer);
-					}
+					readWindowsAnsiPositionResponse(response, 1000);
 				} else {
 					final boolean linuxConsoleMustBeReset = activateLinuxConsoleRawMode();
 					try {
 						// Request current cursor position
 						System.out.print("\033[6n");
 
-						try (Reader inputReader = System.console().reader()) {
-							int byteBuffer;
-							while ((byteBuffer = inputReader.read()) > -1) {
-								if (byteBuffer == 3) {
+						// The console reader is shared by the whole application and must not be closed
+						final Reader inputReader = getConsoleReader();
+						int byteBuffer;
+						while ((byteBuffer = inputReader.read()) > -1) {
+							if (byteBuffer == 3) {
+								break;
+							} else if (byteBuffer == 27) {
+								response.append("\\033");
+							} else {
+								response.append((char) byteBuffer);
+								if ('R' == byteBuffer) {
 									break;
-								} else if (byteBuffer == 27) {
-									response.append("\\033");
-								} else {
-									response.append((char) byteBuffer);
-									if ('R' == byteBuffer) {
-										break;
-									}
 								}
 							}
 						}
@@ -644,12 +844,29 @@ public class ConsoleUtilities {
 
 	/**
 	 * Detects the terminal size by moving the cursor to the far bottom right and requesting its position.
-	 * If a Windows console does not answer within a second, the console type is set to TEST and 24x80 is returned.
+	 * If a Windows console does not answer within a second, 24x80 is returned.
+	 * <p>
+	 * Before, a missing answer also switched the detected console type to TEST as a side effect. This is only done
+	 * during the console type detection now.
 	 *
 	 * @return terminal size
 	 * @throws Exception if the terminal does not answer as expected
 	 */
 	public static Size getTerminalSize() throws Exception {
+		try {
+			return readTerminalSize();
+		} catch (@SuppressWarnings("unused") final TimeoutException e) {
+			return new Size(24, 80);
+		}
+	}
+
+	/**
+	 * Requests the terminal size from the terminal.
+	 *
+	 * @throws TimeoutException if a Windows console does not answer within a second
+	 * @throws Exception if the terminal does not answer as expected
+	 */
+	private static Size readTerminalSize() throws Exception {
 		try {
 			final StringBuilder response = new StringBuilder();
 			saveCurrentCursorPosition();
@@ -670,8 +887,7 @@ public class ConsoleUtilities {
 						// Note: interrupt() cannot cancel a thread blocked in a native call (_getwch/getwchar).
 						// The thread is abandoned here (daemon) rather than actually stopped; this is a known limitation.
 						consoleWithDetectionThread.interrupt();
-						consoleType = ConsoleType.TEST;
-						return new Size(24, 80);
+						throw new TimeoutException("Console did not answer the request for the cursor position in time");
 					}
 				} else {
 					final boolean linuxConsoleMustBeReset = activateLinuxConsoleRawMode();
@@ -679,18 +895,18 @@ public class ConsoleUtilities {
 						// Request current cursor position
 						System.out.print("\033[6n");
 
-						try (Reader inputReader = System.console().reader()) {
-							int byteBuffer;
-							while ((byteBuffer = inputReader.read()) > -1) {
-								if (byteBuffer == 3) {
+						// The console reader is shared by the whole application and must not be closed
+						final Reader inputReader = getConsoleReader();
+						int byteBuffer;
+						while ((byteBuffer = inputReader.read()) > -1) {
+							if (byteBuffer == 3) {
+								break;
+							} else if (byteBuffer == 27) {
+								response.append("\\033");
+							} else {
+								response.append((char) byteBuffer);
+								if ('R' == byteBuffer) {
 									break;
-								} else if (byteBuffer == 27) {
-									response.append("\\033");
-								} else {
-									response.append((char) byteBuffer);
-									if ('R' == byteBuffer) {
-										break;
-									}
 								}
 							}
 						}
@@ -706,6 +922,8 @@ public class ConsoleUtilities {
 
 			final int[] sizeValues = parseAnsiPositionResponse(response, "Cannot detect terminal size");
 			return new Size(sizeValues[0], sizeValues[1]);
+		} catch (final TimeoutException e) {
+			throw e;
 		} catch (final Throwable t) {
 			throw new Exception("Cannot detect terminal size", t);
 		}
@@ -740,124 +958,45 @@ public class ConsoleUtilities {
 	/**
 	 * Reads a single key from the console (Linux: raw termios mode via 'stty', Windows: {@link WindowsKeyStrokeReader}).
 	 * <p>
-	 * Known limitation: escape sequences are identified purely by the number of bytes read in one {@link Reader#read(char[])}
-	 * call (3, 4 or 6 bytes). If an escape sequence and a following regular key end up in the same OS-level read
-	 * (e.g. very fast typing right after an arrow key), this can misidentify the key. This has not been changed here,
-	 * since a correct fix requires stateful byte-by-byte parsing of the escape sequence grammar instead of length-based
-	 * dispatch, which is a larger change than a targeted bug fix.
+	 * On Linux the characters read from the terminal are converted by {@link AnsiKeySequenceParser}, which recognizes
+	 * escape sequences by their grammar. Characters read ahead (e.g. pasted text or fast typing) are kept for the next
+	 * calls. A single Escape key is reported after a short wait for further characters of a possible escape sequence.
 	 *
 	 * @return key code: one of the KeyCode_* constants for special keys, the character code otherwise
-	 * @throws Exception if the console cannot be read
+	 * @throws Exception if the console cannot be read, {@link EOFException} if the terminal is gone
 	 */
 	public static int readKey() throws Exception {
 		try {
 			if (SystemUtilities.isWindowsSystem()) {
 				return WindowsKeyStrokeReader.readKey(true);
 			} else {
-				if (consoleInputBuffer != null) {
-					final int returnValue = consoleInputBuffer.remove();
-					if (consoleInputBuffer.size() == 0) {
-						consoleInputBuffer = null;
-					}
-					return returnValue;
-				} else {
-					final boolean linuxConsoleMustBeReset = activateLinuxConsoleRawMode();
-					try (Reader consoleReader = System.console().reader()) {
-						int nextKeyCode = -1;
-
-						final char[] inputReadBuffer = new char[256];
-						int inputReadBytes;
-						// Read method always waits for next key pressed, no matter how much data is still left in the console-reader
-						inputReadBytes = consoleReader.read(inputReadBuffer);
-						if (inputReadBytes > 1 && inputReadBuffer[0] != 27) {
-							consoleInputBuffer = new LinkedList<>();
-							for (int i = 0; i < inputReadBytes; i++) {
-								consoleInputBuffer.add(inputReadBuffer[i]);
+				synchronized (LINUX_PENDING_INPUT) {
+					while (true) {
+						int keyCode = AnsiKeySequenceParser.parse(LINUX_PENDING_INPUT, false);
+						if (keyCode == AnsiKeySequenceParser.NEED_MORE_INPUT) {
+							final boolean linuxConsoleMustBeReset = activateLinuxConsoleRawMode();
+							try {
+								if (LINUX_PENDING_INPUT.length() == 0) {
+									// Waits for the next key
+									readLinuxConsoleInput();
+									continue;
+								} else if (waitForLinuxConsoleInput(ESCAPE_SEQUENCE_TIMEOUT_MILLIS)) {
+									// The rest of a started escape sequence
+									readLinuxConsoleInput();
+									continue;
+								} else {
+									// No further characters: a single Escape key or an incomplete sequence
+									keyCode = AnsiKeySequenceParser.parse(LINUX_PENDING_INPUT, true);
+								}
+							} finally {
+								if (linuxConsoleMustBeReset) {
+									deactivateLinuxConsoleRawMode();
+								}
 							}
-							nextKeyCode = consoleInputBuffer.remove();
-						} else {
-							nextKeyCode = inputReadBuffer[0];
 						}
 
-						if (nextKeyCode == 3) {
-							consoleInputBuffer = null;
-							return KeyCode_CtrlC;
-						} else if (nextKeyCode == 8) {
-							consoleInputBuffer = null;
-							return KeyCode_Backspace;
-						} else if (nextKeyCode == 9) {
-							consoleInputBuffer = null;
-							return KeyCode_Tab;
-						} else if (nextKeyCode == 13) {
-							consoleInputBuffer = null;
-							return KeyCode_Enter;
-						} else if (nextKeyCode == 22) {
-							consoleInputBuffer = null;
-							return KeyCode_CtrlV;
-						} else if (nextKeyCode == 24) {
-							consoleInputBuffer = null;
-							return KeyCode_CtrlX;
-						} else if (nextKeyCode == 27) {
-							consoleInputBuffer = null;
-							// Escape sequence is entered
-							if (inputReadBytes == 3) {
-								if (inputReadBuffer[1] == 91 && inputReadBuffer[2] == 65) {
-									return KeyCode_ArrowUp;
-								} else if (inputReadBuffer[1] == 91 && inputReadBuffer[2] == 66) {
-									return KeyCode_ArrowDown;
-								} else if (inputReadBuffer[1] == 91 && inputReadBuffer[2] == 67) {
-									return KeyCode_ArrowRight;
-								} else if (inputReadBuffer[1] == 91 && inputReadBuffer[2] == 68) {
-									return KeyCode_ArrowLeft;
-								} else if (inputReadBuffer[1] == 91 && inputReadBuffer[2] == 70) {
-									return KeyCode_End;
-								} else if (inputReadBuffer[1] == 91 && inputReadBuffer[2] == 72) {
-									return KeyCode_Home;
-								} else if (inputReadBuffer[1] == 91 && inputReadBuffer[2] == 90) {
-									return KeyCode_ReverseTab;
-								} else {
-									return KeyCode_Escape;
-								}
-							} else if (inputReadBytes == 4) {
-								if (inputReadBuffer[1] == 91 && inputReadBuffer[2] == 50 && inputReadBuffer[3] == 126) {
-									return KeyCode_Insert;
-								} else if (inputReadBuffer[1] == 91 && inputReadBuffer[2] == 51 && inputReadBuffer[3] == 126) {
-									return KeyCode_Delete;
-								} else if (inputReadBuffer[1] == 91 && inputReadBuffer[2] == 53 && inputReadBuffer[3] == 126) {
-									return KeyCode_PageUp;
-								} else if (inputReadBuffer[1] == 91 && inputReadBuffer[2] == 54 && inputReadBuffer[3] == 126) {
-									return KeyCode_PageDown;
-								} else {
-									return KeyCode_Escape;
-								}
-							} else if (inputReadBytes == 6) {
-								if (inputReadBuffer[1] == 91 && inputReadBuffer[2] == 49 && inputReadBuffer[3] == 59 && inputReadBuffer[4] == 53 && inputReadBuffer[5] == 70) {
-									return KeyCode_CtrlEnd;
-								} else if (inputReadBuffer[1] == 91 && inputReadBuffer[2] == 49 && inputReadBuffer[3] == 59 && inputReadBuffer[4] == 53 && inputReadBuffer[5] == 72) {
-									return KeyCode_CtrlHome;
-								} else if (inputReadBuffer[1] == 91 && inputReadBuffer[2] == 49 && inputReadBuffer[3] == 59 && inputReadBuffer[4] == 53 && inputReadBuffer[5] == 65) {
-									return KeyCode_CtrlArrowUp;
-								} else if (inputReadBuffer[1] == 91 && inputReadBuffer[2] == 49 && inputReadBuffer[3] == 59 && inputReadBuffer[4] == 53 && inputReadBuffer[5] == 66) {
-									return KeyCode_CtrlArrowDown;
-								} else if (inputReadBuffer[1] == 91 && inputReadBuffer[2] == 49 && inputReadBuffer[3] == 59 && inputReadBuffer[4] == 53 && inputReadBuffer[5] == 67) {
-									return KeyCode_CtrlArrowRight;
-								} else if (inputReadBuffer[1] == 91 && inputReadBuffer[2] == 49 && inputReadBuffer[3] == 59 && inputReadBuffer[4] == 53 && inputReadBuffer[5] == 68) {
-									return KeyCode_CtrlArrowLeft;
-								} else {
-									return KeyCode_Escape;
-								}
-							} else {
-								return KeyCode_Escape;
-							}
-						} else if (nextKeyCode == 127) {
-							consoleInputBuffer = null;
-							return KeyCode_Backspace;
-						} else {
-							return nextKeyCode;
-						}
-					} finally {
-						if (linuxConsoleMustBeReset) {
-							deactivateLinuxConsoleRawMode();
+						if (keyCode != AnsiKeySequenceParser.NO_KEY && keyCode != AnsiKeySequenceParser.NEED_MORE_INPUT) {
+							return keyCode;
 						}
 					}
 				}
@@ -871,10 +1010,61 @@ public class ConsoleUtilities {
 		}
 	}
 
+	/** Maximum time to wait for the rest of an escape sequence after an ESC character */
+	private static final long ESCAPE_SEQUENCE_TIMEOUT_MILLIS = 50;
+
+	/** Characters read from the Linux terminal, which were not yet returned as keys. Also used as lock. */
+	private static final StringBuilder LINUX_PENDING_INPUT = new StringBuilder();
+
+	/**
+	 * Returns the reader of the system console. The reader is shared by the whole application, so it must not be closed.
+	 */
+	private static Reader getConsoleReader() throws IOException {
+		final java.io.Console console = System.console();
+		if (console == null) {
+			throw new IOException("No console available");
+		}
+		return console.reader();
+	}
+
+	/**
+	 * Reads the characters available from the Linux terminal (at least one, waiting for it) into the pending input.
+	 */
+	private static void readLinuxConsoleInput() throws IOException {
+		// At least the size of the internal buffer of the console reader, so it hands over everything it has read
+		final char[] inputReadBuffer = new char[1024];
+		final int inputReadCharacters = getConsoleReader().read(inputReadBuffer);
+		if (inputReadCharacters < 1) {
+			// Terminal is gone (e.g. closed SSH session). Returning a key code here would make input loops spin forever.
+			throw new EOFException("End of console input");
+		}
+		LINUX_PENDING_INPUT.append(inputReadBuffer, 0, inputReadCharacters);
+	}
+
+	/**
+	 * Waits up to the given time for further input from the Linux terminal.
+	 *
+	 * @return true if input is available
+	 */
+	private static boolean waitForLinuxConsoleInput(final long timeoutMillis) throws Exception {
+		final Reader consoleReader = getConsoleReader();
+		final long deadline = System.currentTimeMillis() + timeoutMillis;
+		// The console reader of newer Java versions (java.io.ProxyingConsole since Java 21) does not implement ready() and
+		// always returns false. System.in reads the same file descriptor, so its available() shows the waiting input.
+		// System.in itself is never read here, so it holds no buffered data of its own.
+		while (!consoleReader.ready() && System.in.available() == 0) {
+			if (System.currentTimeMillis() >= deadline) {
+				return false;
+			}
+			Thread.sleep(5);
+		}
+		return true;
+	}
+
 	/**
 	 * Reads the next raw character from the console, without interpreting escape sequences.
 	 *
-	 * @return character code, or -1 at the end of the input
+	 * @return character code, or {@link #KeyCode_EndOfInput} at the end of the input
 	 * @throws Exception if the console cannot be read
 	 */
 	public static int readNextRawKey() throws Exception {
@@ -883,8 +1073,16 @@ public class ConsoleUtilities {
 				return WindowsKeyStrokeReader.readKey(true);
 			} else {
 				final boolean linuxConsoleMustBeReset = activateLinuxConsoleRawMode();
-				try (Reader consoleReader = System.console().reader()) {
-					return consoleReader.read();
+				try {
+					// Characters already read ahead by readKey() come first
+					synchronized (LINUX_PENDING_INPUT) {
+						if (LINUX_PENDING_INPUT.length() > 0) {
+							final char nextCharacter = LINUX_PENDING_INPUT.charAt(0);
+							LINUX_PENDING_INPUT.deleteCharAt(0);
+							return nextCharacter;
+						}
+					}
+					return getConsoleReader().read();
 				} finally {
 					if (linuxConsoleMustBeReset) {
 						deactivateLinuxConsoleRawMode();

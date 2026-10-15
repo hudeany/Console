@@ -6,16 +6,6 @@ package de.soderer.console;
  */
 public class WindowsConsoleWidthDetection implements Runnable {
 	private final StringBuilder response;
-	private ConsoleType consoleType = null;
-
-	/**
-	 * Returns the console type detected by the request.
-	 *
-	 * @return ANSI if the console answered, TEST if reading failed, null while the request is running
-	 */
-	public ConsoleType getConsoleType() {
-		return consoleType;
-	}
 
 	/**
 	 * Creates the detection.
@@ -32,16 +22,12 @@ public class WindowsConsoleWidthDetection implements Runnable {
 			// Request current cursor position
 			System.out.print("\033[6n");
 
-			int keyBuffer;
-			while ((keyBuffer = WindowsKeyStrokeReader.readKey(false)) > 0) {
-				response.append((char) keyBuffer);
-			}
-			consoleType = ConsoleType.ANSI;
+			// The caller waits 1 second for this thread, so the answer is waited for slightly shorter
+			ConsoleUtilities.readWindowsAnsiPositionResponse(response, 900);
 		} catch (@SuppressWarnings("unused") final Throwable t) {
 			// Most probably an eclipse console (or, e.g., a native JNA library failure) - catching Throwable
 			// (not just Exception) avoids an unhandled Error surfacing via this thread's default
-			// UncaughtExceptionHandler, and still falls back to TEST cleanly.
-			consoleType = ConsoleType.TEST;
+			// UncaughtExceptionHandler. The incomplete response then makes the caller's parsing fail.
 		}
 	}
 }

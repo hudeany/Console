@@ -2,8 +2,10 @@ package de.soderer.console;
 
 import java.awt.Toolkit;
 import java.awt.datatransfer.DataFlavor;
+import java.io.EOFException;
 
 import de.soderer.console.ConsoleUtilities.TextAttribute;
+import de.soderer.console.utilities.SystemUtilities;
 import de.soderer.console.utilities.Utilities;
 
 /**
@@ -151,14 +153,15 @@ public class PasswordConsoleInput {
 			boolean insertMode = true;
 			char[] content = presetContent == null ? "".toCharArray() : presetContent.toCharArray();
 			int cursorIndex = content.length;
-			final int previousContentLength = content.length;
+			boolean inputCompleted = false;
 
+			// Keep the Linux raw mode active for the whole input instead of switching it for every single key.
+			// Otherwise keys typed in between would be echoed by the terminal in clear text, and each key would start two 'stty' processes.
+			final boolean linuxRawModeMustBeReset = !SystemUtilities.isWindowsSystem() && ConsoleUtilities.activateLinuxConsoleRawMode();
 			try {
-				ConsoleUtilities.saveCurrentCursorPosition();
+				ConsoleUtilities.hideCursor();
+				final InputLineRenderer renderer = InputLineRenderer.start(prompt);
 				while (true) {
-					ConsoleUtilities.hideCursor();
-					ConsoleUtilities.moveCursorToSavedPosition();
-
 					TextAttribute[] cursorTextAttributes;
 					if (insertMode) {
 						cursorTextAttributes = new TextAttribute[] {TextAttribute.UNDERLINE, TextAttribute.HIGH_INTENSITY};
@@ -166,30 +169,23 @@ public class PasswordConsoleInput {
 						cursorTextAttributes = new TextAttribute[] {TextAttribute.REVERSE_VIDEO};
 					}
 
-					System.out.print(prompt);
-					System.out.print(Utilities.repeat(hideCharacter, cursorIndex));
-					if (content.length > cursorIndex) {
-						System.out.print(ConsoleUtilities.getAnsiFormattedText(Character.toString(hideCharacter), null, null, cursorTextAttributes) + Utilities.repeat(hideCharacter, content.length - cursorIndex - 1));
+					// Only hide characters are drawn, the password itself never becomes a String
+					if (cursorIndex < content.length) {
+						renderer.render(Utilities.repeat(hideCharacter, cursorIndex), Character.toString(hideCharacter), Utilities.repeat(hideCharacter, content.length - cursorIndex - 1), cursorTextAttributes);
 					} else {
-						System.out.print(ConsoleUtilities.getAnsiFormattedText(" ", null, null, cursorTextAttributes));
+						renderer.render(Utilities.repeat(hideCharacter, content.length), " ", "", cursorTextAttributes);
 					}
-
-					// Linux needs some extra cleared chars
-					if (content.length - previousContentLength > 0) {
-						System.out.print(Utilities.repeat(" ", content.length - previousContentLength));
-					}
-
-					ConsoleUtilities.clearLineContentAfterCursor();
-
-					ConsoleUtilities.moveCursorToSavedPosition();
 
 					final int keyCode = ConsoleUtilities.readKey();
 
-					if (keyCode == ConsoleUtilities.KeyCode_CtrlC) {
+					if (keyCode == ConsoleUtilities.KeyCode_EndOfInput) {
+						throw new EOFException("End of console input");
+					} else if (keyCode == ConsoleUtilities.KeyCode_CtrlC) {
 						ConsoleUtilities.showCursor();
 						System.exit(1);
 					} else if (keyCode == ConsoleUtilities.KeyCode_CtrlV) {
-						final String data = readClipboardTextOrNull();
+						// Line breaks and other control characters are not allowed in a single line input
+						final String data = ConsoleUtilities.removeControlCharacters(readClipboardTextOrNull());
 						if (data == null) {
 							if (!silent) {
 								beep();
@@ -206,6 +202,7 @@ public class PasswordConsoleInput {
 							for (int i = cursorIndex; i < content.length; i++) {
 								newContent[dataArray.length + i] = content[i];
 							}
+							Utilities.clear(dataArray);
 							Utilities.clear(content);
 							content = newContent;
 							cursorIndex += data.length();
@@ -224,6 +221,7 @@ public class PasswordConsoleInput {
 									newContent[i] = content[i];
 								}
 							}
+							Utilities.clear(dataArray);
 							Utilities.clear(content);
 							content = newContent;
 							cursorIndex += data.length();
@@ -232,10 +230,9 @@ public class PasswordConsoleInput {
 						// do nothing
 					} else if (keyCode == ConsoleUtilities.KeyCode_Enter) {
 						// Remove special displayed cursor
-						ConsoleUtilities.moveCursorToSavedPosition();
-						System.out.print(prompt);
-						System.out.println(Utilities.repeat(hideCharacter, content.length) + " ");
+						renderer.renderFinal(Utilities.repeat(hideCharacter, content.length));
 						ConsoleUtilities.showCursor();
+						inputCompleted = true;
 						return content;
 					} else if (keyCode == ConsoleUtilities.KeyCode_Backspace) {
 						if (cursorIndex > 0) {
@@ -269,13 +266,13 @@ public class PasswordConsoleInput {
 					} else if (keyCode == ConsoleUtilities.KeyCode_ArrowLeft) {
 						if (cursorIndex > 0) {
 							cursorIndex--;
-						} else {
+						} else if (!silent) {
 							beep();
 						}
 					} else if (keyCode == ConsoleUtilities.KeyCode_ArrowRight) {
 						if (cursorIndex < content.length) {
 							cursorIndex++;
-						} else {
+						} else if (!silent) {
 							beep();
 						}
 					} else if (keyCode == ConsoleUtilities.KeyCode_ArrowDown) {
@@ -296,15 +293,13 @@ public class PasswordConsoleInput {
 						cursorIndex = content.length;
 					} else if (keyCode == ConsoleUtilities.KeyCode_Insert) {
 						insertMode = !insertMode;
-					} else if (keyCode == ConsoleUtilities.KeyCode_Tab) {
+					} else if (keyCode == ConsoleUtilities.KeyCode_Tab || keyCode == ConsoleUtilities.KeyCode_ReverseTab) {
 						if (!silent) {
 							beep();
 						}
 					} else {
-						// "keyCode < 1000" to prevent Chinese symbols on some systems, that occur without intention.
-						// "keyCode >= 0x20" excludes remaining control characters (0-31) that are not handled by an
-						// explicit branch above, so they cannot silently end up as literal characters in the password.
-						if ((allowedCharacters != null && allowedCharacters.contains("" + (char) keyCode)) || (keyCode >= 0x20 && keyCode < 1000)) {
+						// Control characters and special key codes are excluded, so they cannot silently end up as literal characters in the password.
+						if ((allowedCharacters != null && allowedCharacters.contains("" + (char) keyCode)) || ConsoleUtilities.isInsertableCharacter(keyCode)) {
 							if (insertMode || cursorIndex == content.length) {
 								final char[] newContent = new char[content.length + 1];
 								for (int i = 0; i < cursorIndex; i++) {
@@ -326,6 +321,13 @@ public class PasswordConsoleInput {
 				}
 			} finally {
 				ConsoleUtilities.showCursor();
+				if (!inputCompleted) {
+					// Input aborted by an exception: do not leave the partially entered password in memory
+					Utilities.clear(content);
+				}
+				if (linuxRawModeMustBeReset) {
+					ConsoleUtilities.deactivateLinuxConsoleRawMode();
+				}
 			}
 		} else {
 			return readPasswordViaSystemConsole();
