@@ -7,6 +7,9 @@
 
 	<!-- Dependency versions -->
 	<property name="jna.version" value="5.19.1" />
+	
+	<!-- Maven POM dependencies: "groupId:artifactId:version[:optional]" -->
+	<property name="mavenDependency.jna" value="net.java.dev.jna:jna:${jna.version}" />
 
 	<!-- Runtime libraries of this project go to "lib/" (may stay empty) -->
 	<target name="download_dependencies" depends="register_antbuildhelp">
@@ -181,7 +184,6 @@
 		<delete dir="${buildPath}/javadoc" />
 		<mkdir dir="${buildPath}/javadoc" />
 
-		<!-- doclint disabled so missing javadoc comments do not break the build -->
 		<javadoc destdir="${buildPath}/javadoc" encoding="UTF-8" charset="UTF-8" docencoding="UTF-8" source="17" failonerror="true">
 			<classpath refid="runtime.libs" />
 			<arg value="-quiet" />
