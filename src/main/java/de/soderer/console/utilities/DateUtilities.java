@@ -7,7 +7,6 @@ import java.time.LocalDateTime;
  * Internal date and time helpers of the console library: ETA estimation and human readable durations.
  */
 public class DateUtilities {
-
 	/**
 	 * Utility class
 	 */
