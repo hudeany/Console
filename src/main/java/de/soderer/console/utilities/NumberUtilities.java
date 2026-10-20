@@ -6,7 +6,6 @@ import java.util.regex.Pattern;
  * Internal number helpers of the console library.
  */
 public class NumberUtilities {
-
 	private NumberUtilities() {
 		// Utility class
 	}
